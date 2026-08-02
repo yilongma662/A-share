@@ -19,6 +19,12 @@ from gvs.datasource import EastmoneyClient, PriceService
 from gvs.factors.growth import composite_score
 from gvs.factors.pit import as_of_snapshot
 from gvs.research.diagnose import diagnose
+from gvs.research.valuation import (
+    build_multiples,
+    gather_inputs,
+    implied_roe,
+    percentile_of,
+)
 from gvs.storage import Store
 
 
@@ -80,6 +86,48 @@ def cmd_universe(args) -> int:
     return 0
 
 
+def cmd_value(args) -> int:
+    store = Store()
+    fin = store.read("financials", args.code)
+    bars = store.read("bars_yahoo", args.code)
+    if bars.empty:
+        bars = store.read("bars_fq0", args.code)
+    if fin.empty or bars.empty:
+        print(f"{args.code} 本地无数据，请先 python -m gvs.cli fetch {args.code}",
+              file=sys.stderr)
+        return 1
+
+    px = bars.set_index(pd.to_datetime(bars["date"]))["close"]
+    as_of = pd.Timestamp(args.as_of) if args.as_of else px.index[-1]
+    px = px[px.index <= as_of]
+    v = gather_inputs(args.code, fin, float(px.iloc[-1]), as_of)
+
+    print(f"{v.name} ({v.code})   截至 {as_of:%Y-%m-%d}   收盘 {v.price:.2f}")
+    print(f"  总市值      {v.market_cap / 1e8:>10.2f} 亿")
+    print(f"  TTM归母净利 {v.ttm_profit / 1e8:>10.3f} 亿   "
+          f"（{v.report_name}，公告 {v.notice_date:%Y-%m-%d}）")
+    print(f"  PE(TTM)     {v.pe_ttm:>10.2f}")
+    print(f"  PB          {v.pb:>10.2f}")
+    print(f"  ROE(TTM)    {v.roe_ttm:>10.2f}%")
+
+    hist = build_multiples(px, fin)
+    if not hist.empty:
+        print("\n  历史分位：", end="")
+        parts = []
+        for col, cur, label in (("pe_ttm", v.pe_ttm, "PE"), ("pb", v.pb, "PB")):
+            s = hist[col].dropna()
+            if not s.empty and cur is not None:
+                parts.append(f"{label} {percentile_of(s, cur):.0%}")
+        print("   ".join(parts))
+
+    print(f"\n  当前 PB {v.pb:.2f} 隐含的永续 ROE（k=10%, g=3%）："
+          f"{implied_roe(v.pb, 10.0, 3.0):.1f}%")
+    print("  与公司历史 ROE 对照即可判断该预期是否曾被实现过。")
+    print("\n  完整分析：python3 scripts/value_stock.py "
+          f"{args.code} --peers <同业代码>")
+    return 0
+
+
 def cmd_screen(args) -> int:
     store = Store()
     fin_dir = config.CURATED_DIR / "financials"
@@ -130,6 +178,11 @@ def main(argv: list[str] | None = None) -> int:
     f.set_defaults(func=cmd_fetch)
 
     sub.add_parser("universe", help="更新全市场标的表").set_defaults(func=cmd_universe)
+
+    val = sub.add_parser("value", help="个股估值速览")
+    val.add_argument("code")
+    val.add_argument("--as-of", default=None)
+    val.set_defaults(func=cmd_value)
 
     s = sub.add_parser("screen", help="成长股筛选")
     s.add_argument("--top", type=int, default=20)

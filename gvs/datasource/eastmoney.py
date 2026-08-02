@@ -22,10 +22,13 @@ KLINE_COLUMNS = [
     "amplitude", "pct_chg", "change", "turnover",
 ]
 
+# PE 字段口径经单股接口 stock/get 逐一比对确认（002185 2026-07-31）：
+#   f9=148.10 动态（最新单季年化）  f114=72.36 静态（上年度）  f115=63.02 TTM
+# 三者差异极大，混用会使估值结论完全错误，切勿凭字段名猜测。
 LIST_FIELDS = {
     "f12": "code", "f14": "name", "f2": "close", "f3": "pct_chg",
-    "f9": "pe_ttm", "f23": "pb", "f20": "total_mv", "f21": "float_mv",
-    "f115": "pe_static", "f13": "market",
+    "f9": "pe_dynamic", "f114": "pe_static", "f115": "pe_ttm",
+    "f23": "pb", "f20": "total_mv", "f21": "float_mv", "f13": "market",
 }
 
 # 主要财务指标，取自 RPT_F10_FINANCE_MAINFINADATA。
@@ -218,7 +221,8 @@ class EastmoneyClient:
 
         df = pd.DataFrame(rows).rename(columns=LIST_FIELDS)
         df = df[[c for c in LIST_FIELDS.values() if c in df.columns]]
-        for c in ("close", "pct_chg", "pe_ttm", "pb", "total_mv", "float_mv", "pe_static"):
+        for c in ("close", "pct_chg", "pe_ttm", "pe_dynamic", "pe_static",
+                  "pb", "total_mv", "float_mv"):
             if c in df:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         df["is_st"] = df["name"].str.contains("ST", case=False, na=False)
