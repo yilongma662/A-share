@@ -1,0 +1,35 @@
+{
+  "strategy": {
+    "total_return": 11.795725367051421,
+    "annual_return": 0.40153241330362843,
+    "annual_volatility": 0.31996898712891847,
+    "sharpe": 1.2080308681537655,
+    "max_drawdown": -0.3689507737919323,
+    "max_drawdown_days": 435,
+    "calmar": 1.0883089068409715,
+    "win_rate": 0.508991825613079,
+    "periods": 1835,
+    "benchmark_return": null,
+    "excess_return": null,
+    "information_ratio": null
+  },
+  "benchmark": {
+    "total_return": 7.038730844808919,
+    "annual_return": 0.3178607232635118,
+    "annual_volatility": 0.22383790005456394,
+    "sharpe": 1.3530359389079543,
+    "max_drawdown": -0.2542206227324416,
+    "max_drawdown_days": 440,
+    "calmar": 1.2503341383049367,
+    "win_rate": 0.5177111716621253,
+    "periods": 1835,
+    "benchmark_return": null,
+    "excess_return": null,
+    "information_ratio": null
+  },
+  "codes": 81,
+  "top_n": 15,
+  "start": "2019-01-01",
+  "dataset": "bars_yahoo",
+  "trades": 90
+}
