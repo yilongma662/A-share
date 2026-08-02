@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 数据与回测产物不入库：体积大且可复现
+data/
+reports/*.png
+reports/*.parquet
