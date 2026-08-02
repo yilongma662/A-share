@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -25,23 +26,63 @@ class AllProvidersFailed(RuntimeError):
 
 
 @dataclass
+class CircuitBreaker:
+    """熔断器。
+
+    东财限流一旦触发会持续数分钟，此时每只股票都重试 4 次纯属浪费
+    （实测批量任务中每只多耗约 10 秒）。连续失败达阈值后直接跳过该源，
+    冷却期满再试探一次。
+    """
+
+    threshold: int = 2
+    cooldown: float = 180.0
+    failures: int = 0
+    opened_at: float | None = None
+
+    @property
+    def is_open(self) -> bool:
+        if self.opened_at is None:
+            return False
+        if time.monotonic() - self.opened_at >= self.cooldown:
+            self.reset()          # 冷却结束，放行一次试探请求
+            return False
+        return True
+
+    def record_failure(self) -> None:
+        self.failures += 1
+        if self.failures >= self.threshold and self.opened_at is None:
+            self.opened_at = time.monotonic()
+            log.warning("数据源连续失败 %d 次，熔断 %.0f 秒", self.failures, self.cooldown)
+
+    def reset(self) -> None:
+        self.failures = 0
+        self.opened_at = None
+
+
+@dataclass
 class PriceService:
     eastmoney: EastmoneyClient = field(default_factory=EastmoneyClient)
     yahoo: YahooClient = field(default_factory=YahooClient)
     allow_fallback: bool = True
+    breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
 
     def daily_bars(self, code: str, adjust: int = 1, **kwargs) -> pd.DataFrame:
         """优先东财（历史更长、复权口径统一），失败时降级 Yahoo。"""
         errors: list[str] = []
-        try:
-            df = self.eastmoney.daily_bars(code, adjust=adjust, **kwargs)
-            if not df.empty:
-                df["_provider"] = "eastmoney"
-                return df
-            errors.append("eastmoney 返回空")
-        except DataSourceError as exc:
-            errors.append(f"eastmoney: {exc}")
-            log.warning("东财取数失败，尝试降级: %s", exc)
+        if self.breaker.is_open:
+            errors.append("eastmoney: 熔断中，跳过")
+        else:
+            try:
+                df = self.eastmoney.daily_bars(code, adjust=adjust, **kwargs)
+                if not df.empty:
+                    self.breaker.reset()
+                    df["_provider"] = "eastmoney"
+                    return df
+                errors.append("eastmoney 返回空")
+            except DataSourceError as exc:
+                errors.append(f"eastmoney: {exc}")
+                self.breaker.record_failure()
+                log.warning("东财取数失败，尝试降级: %s", exc)
 
         if not self.allow_fallback:
             raise AllProvidersFailed(f"{code} 取数失败且未启用降级: {errors}")

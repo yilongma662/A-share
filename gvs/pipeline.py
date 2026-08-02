@@ -7,6 +7,7 @@ import pandas as pd
 
 from gvs import config
 from gvs.datasource.eastmoney import EastmoneyClient
+from gvs.datasource.prices import PriceService
 from gvs.storage.store import Store
 
 log = logging.getLogger(__name__)
@@ -36,28 +37,34 @@ def ingest_bars(
     store: Store | None = None,
     adjust: int = 1,
     incremental: bool = True,
+    prices: PriceService | None = None,
 ) -> pd.DataFrame:
-    """个股日线。前复权用于回测，不复权用于展示，分数据集存放。"""
-    client = client or EastmoneyClient()
+    """个股日线。前复权用于回测，不复权用于展示，分数据集存放。
+
+    经 PriceService 取数，东财限流时自动降级 Yahoo。降级数据的复权口径不同，
+    因此按 _provider 分数据集存放，避免两种口径混入同一序列。
+    """
     store = store or Store()
-    dataset = f"bars_fq{adjust}"
+    prices = prices or PriceService(eastmoney=client or EastmoneyClient())
 
     start = "19900101"
-    if incremental:
-        last = store.last_date(dataset, code)
+    if incremental and adjust == 0:
+        # 前复权序列会因分红除权整体改写历史价格，增量更新只对不复权安全
+        last = store.last_date(f"bars_fq{adjust}", code)
         if last is not None:
-            # 前复权序列会因分红除权整体变化，增量只对不复权安全
-            if adjust == 0:
-                start = (last - pd.Timedelta(days=5)).strftime("%Y%m%d")
-            else:
-                log.debug("%s 前复权序列全量重取（除权会改写历史价格）", code)
+            start = (last - pd.Timedelta(days=5)).strftime("%Y%m%d")
 
-    df = client.daily_bars(code, start=start, adjust=adjust)
+    df = prices.daily_bars(code, adjust=adjust, start=start)
     if df.empty:
         log.warning("%s 无行情数据（可能已退市或代码错误）", code)
         return df
 
-    store.write(df, dataset, code, source=SRC, endpoint=config.EM_KLINE_URL,
+    provider = str(df["_provider"].iloc[0])
+    actual_adjust = int(df["adjust"].iloc[0]) if "adjust" in df else adjust
+    dataset = f"bars_fq{actual_adjust}" if provider == "eastmoney" else f"bars_{provider}"
+    endpoint = config.EM_KLINE_URL if provider == "eastmoney" else config.YAHOO_CHART_URL
+
+    store.write(df, dataset, code, source=provider, endpoint=endpoint,
                 dedup_on=["code", "date"], sort_on=["date"])
     return df
 
@@ -77,20 +84,32 @@ def ingest_financials(
     return df
 
 
-def build_price_panel(codes: list[str], store: Store | None = None, adjust: int = 1) -> pd.DataFrame:
-    """拼接多只股票的收盘价面板，供回测使用。缺失值保留为 NaN（代表停牌/未上市）。"""
+def build_price_panel(
+    codes: list[str],
+    store: Store | None = None,
+    adjust: int = 1,
+    dataset: str | None = None,
+) -> pd.DataFrame:
+    """拼接多只股票的收盘价面板，供回测使用。缺失值保留为 NaN（代表停牌/未上市）。
+
+    只从单一数据集读取。不同来源的复权口径不同，混入同一面板会使回测收益失真，
+    因此宁可让缺失的股票缺席，也不跨源拼接。
+    """
     store = store or Store()
-    series = {}
-    missing = []
+    dataset = dataset or f"bars_fq{adjust}"
+    series: dict[str, pd.Series] = {}
+    missing: list[str] = []
     for c in codes:
-        df = store.read(f"bars_fq{adjust}", c)
+        df = store.read(dataset, c)
         if df.empty:
             missing.append(c)
             continue
         s = df.set_index(pd.to_datetime(df["date"]))["close"]
         series[c] = s[~s.index.duplicated(keep="last")]
     if missing:
-        log.warning("%d 只股票无本地行情，未纳入面板: %s", len(missing), missing[:10])
+        # 显式告警：静默丢弃标的会造成隐性幸存者偏差
+        log.warning("数据集 %s 中缺失 %d 只股票，未纳入面板: %s",
+                    dataset, len(missing), missing[:10])
     if not series:
-        raise ValueError("价格面板为空，请先执行 ingest_bars")
+        raise ValueError(f"数据集 {dataset} 为空，请先执行 ingest_bars")
     return pd.DataFrame(series).sort_index()

@@ -8,3 +8,4 @@ venv/
 data/
 reports/*.png
 reports/*.parquet
+*.egg-info/

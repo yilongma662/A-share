@@ -142,6 +142,7 @@ def composite_score(
         out["report_name"] = snap["report_name"].values
 
     dropped: list[str] = []
+    empty_blocks: list[str] = []
     block_scores: dict[str, pd.Series] = {}
     for block, funcs in blocks.items():
         parts = []
@@ -152,16 +153,29 @@ def composite_score(
                 dropped.append(f"{r.name}(覆盖率{r.coverage:.0%})")
                 continue
             parts.append(r.zscore())
-        block_scores[block] = (
-            pd.concat(parts, axis=1).mean(axis=1) if parts
-            else pd.Series(np.nan, index=snap.index)
-        )
+        if parts:
+            block_scores[block] = pd.concat(parts, axis=1).mean(axis=1)
+        else:
+            block_scores[block] = pd.Series(np.nan, index=snap.index)
+            empty_blocks.append(block)
         out[f"score_{block}"] = block_scores[block].values
 
-    total = sum(block_scores[b].fillna(0) * w[b] for b in blocks)
-    # 三个维度全缺失的股票不给分，避免 fillna(0) 把无数据伪装成中性
-    all_nan = pd.concat(block_scores.values(), axis=1).isna().all(axis=1)
+    # 整块因子缺失时必须重新归一化权重。
+    # 若直接 fillna(0) 加权，缺失块会被当作"中性分 0"计入，
+    # 结果是权重和不为 1，各维度的相对影响被悄悄改变 —— 分数看似正常，实则失真。
+    live = {b: w[b] for b in blocks if b not in empty_blocks}
+    wsum = sum(live.values())
+    if not live:
+        raise ValueError(f"所有因子块均无有效数据（剔除: {dropped}），无法打分")
+    effective = {b: v / wsum for b, v in live.items()}
+
+    total = sum(block_scores[b].fillna(0) * effective[b] for b in live)
+    # 所有维度均缺失的个股不给分，避免 fillna(0) 把"无数据"伪装成"中性"
+    all_nan = pd.concat([block_scores[b] for b in live], axis=1).isna().all(axis=1)
     out["score_total"] = total.where(~all_nan).values
+
     out.attrs["dropped_factors"] = dropped
+    out.attrs["empty_blocks"] = empty_blocks
     out.attrs["weights"] = w
+    out.attrs["effective_weights"] = effective
     return out.sort_values("score_total", ascending=False)
