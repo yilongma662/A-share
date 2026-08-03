@@ -239,6 +239,89 @@ def peer_comparison(
     return pd.DataFrame(rows)
 
 
+def normalized_roe(fin: pd.DataFrame, years: int = 12) -> dict:
+    """中周期正常化 ROE。
+
+    强周期公司的当期 ROE 既不代表能力也不代表未来 —— 底部会低估、顶部会高估。
+    取跨越完整周期的年报 ROE 分布，比单点数字可靠得多。
+
+    只用**年报**：季报 ROE 未年化，与年报混在一起统计会把中枢严重拉低。
+    """
+    if fin.empty or "roe" not in fin:
+        return {"usable": False, "reason": "无 ROE 数据"}
+
+    f = fin.copy()
+    f["report_date"] = pd.to_datetime(f["report_date"])
+    annual = (f[f["report_date"].dt.month == 12]
+              .sort_values("report_date")
+              .drop_duplicates("report_date", keep="last")
+              .tail(years))
+    roe = pd.to_numeric(annual["roe"], errors="coerce").dropna()
+    if len(roe) < 5:
+        return {"usable": False, "reason": f"年报样本仅 {len(roe)} 期，不足以刻画周期"}
+
+    return {
+        "usable": True, "n": len(roe),
+        "mean": float(roe.mean()), "median": float(roe.median()),
+        "max": float(roe.max()), "min": float(roe.min()),
+        "series": pd.Series(roe.values, index=annual["report_date"].dt.year.values[-len(roe):]),
+    }
+
+
+def fair_value_range(
+    inputs: "ValuationInputs",
+    fin: pd.DataFrame,
+    peers: pd.DataFrame | None = None,
+    *,
+    discount_rates: tuple[float, ...] = (8.0, 10.0),
+    growth: float = 3.0,
+) -> pd.DataFrame:
+    """汇总各锚定方法的合理价。
+
+    刻意输出多个锚定而非单一目标价 —— 对强周期公司，
+    基本面锚定与同业锚定常常相差一倍以上，用一个数掩盖这种分歧才是误导。
+    """
+    rows: list[dict] = []
+    norm = normalized_roe(fin)
+
+    if norm["usable"]:
+        anchors = [("中周期均值", norm["mean"]), ("中周期中位", norm["median"]),
+                   ("历史最佳", norm["max"])]
+        for label, roe in anchors:
+            for k in discount_rates:
+                pb = justified_pb(roe, k, growth)
+                price = pb * inputs.bps
+                rows.append({
+                    "方法": f"剩余收益·{label}",
+                    "假设": f"ROE {roe:.2f}%  k={k:.0f}%  g={growth:.0f}%",
+                    "合理PB": pb, "合理价": price,
+                    "相对现价": price / inputs.price - 1,
+                })
+
+    if peers is not None and not peers.empty:
+        ratio = pb_to_roe_ratio(peers, inputs.code)
+        if not ratio.empty and inputs.roe_ttm > 0:
+            # 异常值定义为 PB/ROE 超过中位数三倍，通常是尚未盈利的成长股
+            med_all = ratio["PB/ROE"].median()
+            core = ratio[ratio["PB/ROE"] <= med_all * 3]
+            for label, sub in (("全部同业", ratio), ("剔除异常值", core)):
+                if sub.empty:
+                    continue
+                r = float(sub["PB/ROE"].median())
+                pb = r * inputs.roe_ttm
+                price = pb * inputs.bps
+                rows.append({
+                    "方法": f"同业PB/ROE·{label}",
+                    "假设": f"PB/ROE {r:.3f} × ROE {inputs.roe_ttm:.2f}%  n={len(sub)}",
+                    "合理PB": pb, "合理价": price,
+                    "相对现价": price / inputs.price - 1,
+                })
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("合理价").reset_index(drop=True)
+
+
 def pb_roe_cross_section(peers: pd.DataFrame, target: str) -> dict:
     """PB-ROE 横截面回归。
 

@@ -14,6 +14,7 @@ from gvs.research.valuation import (
     Scenario,
     ValuationResult,
     build_multiples,
+    fair_value_range,
     gather_inputs,
     implied_roe,
     pb_roe_cross_section,
@@ -191,6 +192,24 @@ def main() -> None:
             if cs["r2"] < 0.5:
                 print(f"注意：R²={cs['r2']:.3f} 偏低，ROE 对 PB 的解释力不足，"
                       "该结论可信度有限。")
+
+    print("\n" + "=" * 74)
+    print("合理价区间汇总")
+    print("=" * 74)
+    fv = fair_value_range(v, fin, result.peers if args.peers else None)
+    if fv.empty:
+        print("数据不足，无法汇总。")
+    else:
+        t = fv.copy()
+        t["合理PB"] = t["合理PB"].round(2)
+        t["合理价"] = t["合理价"].round(2)
+        t["相对现价"] = (t["相对现价"] * 100).round(1).astype(str) + "%"
+        print(t.to_string(index=False))
+        lo, hi = fv["合理价"].min(), fv["合理价"].max()
+        print(f"\n合理价区间 {lo:.2f} ~ {hi:.2f} 元   现价 {v.price:.2f} 元")
+        if hi / lo > 2:
+            print("各锚定方法分歧超过一倍 —— 不存在可靠的单一目标价，"
+                  "分歧本身即是结论：基本面与同业定价给出不同答案。")
 
     print("\n" + "=" * 74)
     print("本估值的局限")

@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 
 from gvs.research.valuation import (
+    fair_value_range,
+    normalized_roe,
     gather_inputs,
     implied_roe,
     justified_pb,
@@ -138,3 +140,42 @@ def test_分位数计算():
     s = pd.Series(range(101), dtype=float)
     assert percentile_of(s, 50.0) == pytest.approx(0.5049, abs=0.001)
     assert percentile_of(s, 0.0) == pytest.approx(1 / 101, abs=0.001)
+
+
+def test_中周期ROE只取年报():
+    """季报 ROE 未年化，混入统计会把周期中枢严重拉低。"""
+    rows = []
+    for y in range(2014, 2026):
+        rows.append({"report_date": f"{y}-12-31", "roe": 8.0})
+        rows.append({"report_date": f"{y}-03-31", "roe": 0.5})   # 季报，应被排除
+    norm = normalized_roe(pd.DataFrame(rows))
+    assert norm["usable"] is True
+    assert norm["n"] == 12
+    assert norm["mean"] == pytest.approx(8.0), "混入季报会把均值拉低到 4.25 附近"
+
+
+def test_年报样本不足时拒绝正常化():
+    rows = [{"report_date": f"{y}-12-31", "roe": 8.0} for y in (2023, 2024, 2025)]
+    assert normalized_roe(pd.DataFrame(rows))["usable"] is False
+
+
+def test_合理价区间同时给出基本面与同业锚定(cumulative):
+    v = gather_inputs("002185", cumulative, price=15.47, as_of="2026-07-31")
+    fin = pd.concat([
+        cumulative,
+        pd.DataFrame([{"report_name": f"{y}年报", "report_date": f"{y}-12-31",
+                       "notice_date": f"{y + 1}-03-31", "net_profit": 5e8,
+                       "bps": 5.0, "total_share": 3.3e9, "roe": r, "code": "002185"}
+                      for y, r in zip(range(2014, 2025),
+                                      [14.7, 11.8, 8.2, 9.7, 7.1, 4.3, 8.7, 14.0, 4.9, 1.4, 3.8])]),
+    ], ignore_index=True)
+    peers = pd.DataFrame({
+        "code": ["002185", "A", "B", "C"], "name": ["华天", "A", "B", "C"],
+        "PB": [2.82, 4.06, 5.50, 4.09], "ROE(TTM)%": [4.48, 7.93, 9.24, 5.74],
+    })
+    fv = fair_value_range(v, fin, peers)
+    methods = " ".join(fv["方法"])
+    assert "剩余收益" in methods and "同业PB/ROE" in methods
+    assert (fv["合理价"] > 0).all()
+    # 强周期股的两类锚定必然分歧，区间不应被压缩成一个点
+    assert fv["合理价"].max() / fv["合理价"].min() > 1.5
